@@ -1,0 +1,9 @@
+Criterion,Metric,ρ,Valid Pairs
+Mutation Score (Ours),MutationAdequacy,0.6522116006417573,130
+Distributional Balance,BalanceToFull,0.537797872965669,130
+Feature Space Coverage,FeatureSpaceCoverage,0.4523045019663979,130
+Combinatorial Coverage,DatasetCoverage,0.4013448858853289,130
+Boundary Coverage,BoundaryCoverage,0.11387582776613608,130
+Individual Discrimination,IDI_Percentage,0.002033760641306866,130
+Test Set Diversity,TestSetDiameter,-0.02007151551827235,130
+Distance to Training,DSA,-0.08188118672674598,130

@@ -1,0 +1,9 @@
+Adequacy Criterion,Metric,Spearman ρ,Valid Pairs
+Mutation Based,MutationAdequacy,0.7512881117259816,130
+Distributional Balance,BalanceToFull,0.6317983430776715,130
+
+Combinatorial Coverage,DatasetCoverage,0.34224697995847625,130
+Decision Boundary Coverage,BoundaryCoverage,0.19323883115527762,130
+Individual Discrimination Index,IDI_Percentage,0.07093987082125654,130
+Distance to Training,DSA,0.024914889059747564,130
+

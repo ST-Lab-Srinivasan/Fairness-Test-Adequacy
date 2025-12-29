@@ -1,0 +1,9 @@
+Adequacy Criterion,Category,Metric,Spearman ρ,Valid Pairs
+Mutation Score (OURS),Fault-Based,MutationAdequacy,0.7069623668048348,107
+Combinatorial Coverage,Coverage-Based,DatasetCoverage,0.11906747753514424,107
+Individual Discrimination Index,Counterfactual-Based,IDI_Percentage,0.0986812177890885,107
+Feature Space Coverage,Coverage-Based,FeatureSpaceCoverage,0.05725801329297514,107
+Test Set Diversity,Diversity-Based,TestSetDiameter,0.05065806416494058,107
+Distance to Training,Distance-Based,DSA,0.03167791990238333,107
+Distributional Balance,Distribution-Based,BalanceToFull,-0.04139212524379169,107
+Decision Boundary Coverage,Boundary-Based,BoundaryCoverage,-0.12544981586054899,107
