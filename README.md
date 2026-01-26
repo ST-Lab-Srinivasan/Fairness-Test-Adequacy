@@ -880,8 +880,7 @@ For questions, bug reports, or collaboration inquiries:
 
 ACKNOWLEDGMENTS:
 This work was conducted at the Department of Computer Science, 
-East Carolina University. We thank the reviewers and editors of the 
-Journal of Systems and Software for their valuable feedback.
+East Carolina University.
 
 ================================================================================
 ADDITIONAL NOTES
