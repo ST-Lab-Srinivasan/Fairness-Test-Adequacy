@@ -34,7 +34,7 @@ The framework has been evaluated on five real-world datasets:
    - Source: UCI Machine Learning Repository / Census Income
    - Instances: 48,842 (Training: 32,561 | Testing: 16,281)
    - Features: 14 demographic and socioeconomic attributes
-   - Task: Binary classification (income >50K or ≤50K)
+   - Task: Binary classification (income >50K or <=50K)
    - Sensitive Attributes: sex, race, age, marital_status, education
    - URL: https://www.kaggle.com/datasets/wenruliu/adult-income-dataset
 
@@ -82,10 +82,13 @@ CODE INFORMATION
 ================================================================================
 
 STRUCTURE:
-├── main.py                           # RQ1: Mutation-based adequacy evaluation
+├── main.py                              # RQ1: Mutation-based adequacy evaluation
+├── get_rq2_graph.py                     # RQ1: Dataset-specific execution (COMPAS example)
 ├── result_compare_mutation_baseline.py  # RQ2: Baseline comparison
-├── get_rq3_answer.py                   # RQ3: Test set strength analysis
-└── README.txt                          # This file
+├── rq3_answer.py                    # RQ3: Test set strength analysis
+├── generate_graph_baseline_comparison.py # RQ2: Visualization of baseline comparison
+├── heat_map_result.py                   # RQ1: Heatmap visualization of mutation scores
+└── README.txt                           # This file
 
 --------------------------------------------------------------------------------
 FILE 1: main.py - RESEARCH QUESTION 1 (RQ1)
@@ -141,7 +144,7 @@ KEY COMPONENTS:
    - K-Nearest Neighbors (KNN)
 
 4. MUTATION SCORE CALCULATION:
-   - Threshold: μ_Δ + 1.5σ_Δ (mean + 1.5 × std deviation of fairness changes)
+   - Threshold: mean + 1.5*std deviation of fairness changes
    - Status: Mutant "killed" if fairness deviation exceeds threshold
    - Score: Percentage of killed mutants
 
@@ -162,7 +165,114 @@ CONFIGURATION PARAMETERS:
 - MAX_PER_OPERATOR: 20 (per-operator mutant limit)
 
 --------------------------------------------------------------------------------
-FILE 2: result_compare_mutation_baseline.py - RESEARCH QUESTION 2 (RQ2)
+FILE 2: get_rq2_graph.py - DATASET-SPECIFIC EXECUTION (RQ1)
+--------------------------------------------------------------------------------
+
+PURPOSE:
+A self-contained, dataset-specific implementation of the mutation-based fairness 
+test adequacy framework. This script demonstrates the complete pipeline for the 
+COMPAS dataset and serves as a template for running experiments on other datasets.
+
+RESEARCH QUESTION SUPPORTED:
+RQ1 - "How effective is the proposed fairness test adequacy approach in detecting 
+fairness violations across different ML models, datasets, and mutation operators?"
+
+KEY COMPONENTS:
+
+1. DATASET CONFIGURATION:
+   - Configured for COMPAS recidivism prediction dataset
+   - Label column: "two_year_recid" (binary: will reoffend in 2 years)
+   - Sensitive attributes: race, sex, age, age_cat, c_charge_degree, 
+     priors_count, juv_fel_count, juv_misd_count, juv_other_count
+   - Numeric candidates for mutation operators: age, priors_count, 
+     decile_score, days_b_screening_arrest, juvenile counts
+
+2. DATA LOADING AND PREPROCESSING:
+   - load_compas(): Reads CSV, normalizes column names, validates label column
+   - create_train_test(): Stratified 70/30 train-test split
+   - prepare_xy(): Feature engineering pipeline including:
+     * Numeric conversion with NaN/inf handling
+     * Median imputation for missing values
+     * 99th percentile clipping for outliers
+     * One-hot encoding for categorical variables
+     * Column alignment between train and test sets
+
+3. FAIRNESS METRICS IMPLEMENTATION:
+   - compute_equalized_odds(): Calculates TPR and FPR per demographic group
+   - compute_equal_opportunity(): Calculates TPR per demographic group
+   - compute_demographic_parity(): Calculates positive prediction rate per group
+   - determine_status_per_groups(): Threshold-based mutant kill determination
+     using mean + 1*std of fairness differences
+
+4. DISTRIBUTION SHIFT SCORING:
+   - compute_distribution_shift_score(): Measures data drift between original 
+     and mutated training data
+   - Numeric columns: Standardized mean difference
+   - Categorical columns: L1 distance between distributions
+   - Mutants exceeding HIGH_SHIFT_THRESHOLD (5.0%) are filtered
+
+5. MODEL TRAINING AND EVALUATION:
+   - Supports 5 ML classifiers:
+     * Logistic Regression (max_iter=500, balanced class weights)
+     * Decision Tree (max_depth=10)
+     * K-Nearest Neighbors (n_neighbors=5)
+     * Random Forest (n_estimators=100, max_depth=10)
+     * Gradient Boosting (n_estimators=100, max_depth=5)
+   - StandardScaler applied to all features
+   - NaN safety checks at multiple stages
+
+6. MUTATION OPERATOR TOGGLES:
+   - ENABLE_INTERSECTIONAL_LABEL_FLIP: True/False
+   - ENABLE_GROUP_CORRUPTION: True/False
+   - ENABLE_COUNTERFACTUAL_SWAP: True/False
+
+7. CORE PIPELINE (run_model_block function):
+   - Prepares training and test data
+   - Trains baseline model and generates predictions
+   - Creates test set variants (full, stratified, demographic-removed)
+   - Builds all mutants and filters by distribution shift
+   - Evaluates each mutant on each test set for all three fairness metrics
+   - Records killed/alive status per sensitive attribute
+
+8. OUTPUT GENERATION (write_master_tables function):
+   - Concatenates results across all models
+   - Generates master_summary.csv with detailed per-mutant results
+   - Generates master_operator_summary.csv with aggregated operator statistics
+
+OUTPUTS:
+- OUTPUT_ROOT/equalized_odds/[model_name]/detailed.csv
+- OUTPUT_ROOT/demographic_parity/[model_name]/detailed.csv
+- OUTPUT_ROOT/equal_opportunity/[model_name]/detailed.csv
+- OUTPUT_ROOT/[metric]/master_summary.csv
+- OUTPUT_ROOT/[metric]/master_operator_summary.csv
+
+CONFIGURATION:
+- COMPAS_FILE: Path to compas-scores-two-years.csv
+- OUTPUT_ROOT: Directory for output files
+- LABEL_COL: Target column name ("two_year_recid")
+- SENSITIVE_ATTRIBUTES: List of protected attributes
+- LINEAR_NUMERIC_CANDIDATES: Numeric columns for mutation operators
+- MIN_GROUP_SIZE: Minimum 10 instances per demographic group
+- RANDOM_STATE: 42 for reproducibility
+- MAX_MUTANTS: 5000 global cap
+- MAX_PER_OPERATOR: 20 mutants per operator
+- HIGH_SHIFT_THRESHOLD: 5.0% distribution shift filter
+
+USAGE:
+1. Update COMPAS_FILE path to your dataset location
+2. Update OUTPUT_ROOT to desired output directory
+3. Run: python get_rq2_graph.py
+4. Results saved in OUTPUT_ROOT organized by fairness metric
+
+ADAPTATION FOR OTHER DATASETS:
+To use this script with a different dataset:
+1. Update file path and LABEL_COL to match your dataset
+2. Modify SENSITIVE_ATTRIBUTES list for your protected attributes
+3. Update LINEAR_NUMERIC_CANDIDATES for numeric columns
+4. Adjust load function if CSV format differs
+
+--------------------------------------------------------------------------------
+FILE 3: result_compare_mutation_baseline.py - RESEARCH QUESTION 2 (RQ2)
 --------------------------------------------------------------------------------
 
 PURPOSE:
@@ -192,13 +302,13 @@ BASELINE ADEQUACY METRICS:
 
 4. INDIVIDUAL DISCRIMINATION INDEX (IDI)
    - Percentage of test instances with counterfactual prediction changes
-   - Formula: |{x : ∃x' ∈ CF(x), f(x) ≠ f(x')}| / |Test Set|
+   - Formula: |{x : exists x' in CF(x), f(x) != f(x')}| / |Test Set|
    - Inspired by ADF and THEMIS approaches
 
 5. DECISION BOUNDARY COVERAGE
    - Fraction of test instances near decision threshold
-   - Formula: |{x : |p(x) - 0.5| < ε}| / |Test Set|
-   - Uses ε = 0.05 (5% margin around 0.5 threshold)
+   - Formula: |{x : |p(x) - 0.5| < epsilon}| / |Test Set|
+   - Uses epsilon = 0.05 (5% margin around 0.5 threshold)
 
 6. FEATURE SPACE COVERAGE
    - Coverage of sensitive attribute value ranges
@@ -221,15 +331,15 @@ STATISTICAL ANALYSIS:
 
 OUTPUTS:
 - merged_data_ALL_TESTSETS.csv: All metrics for all test sets
-- final_correlation_ALL_TESTSETS.csv: Correlation results ranked by ρ
+- final_correlation_ALL_TESTSETS.csv: Correlation results ranked by rho
 
 EXPECTED RESULTS:
-- Mutation Score achieves highest correlation (ρ = 0.20 to 1.00)
+- Mutation Score achieves highest correlation (rho = 0.20 to 1.00)
 - Statistically significant in all 15 dataset-metric combinations
 - Baselines show inconsistent performance (8-9/15 significant cases)
 
 --------------------------------------------------------------------------------
-FILE 3: get_rq3_answer.py - RESEARCH QUESTION 3 (RQ3)
+FILE 4: get_rq3_answer.py - RESEARCH QUESTION 3 (RQ3)
 --------------------------------------------------------------------------------
 
 PURPOSE:
@@ -269,11 +379,11 @@ METHODOLOGY:
    - master_summary_equalized_odd.csv
 
 2. Map test set names to strength categories:
-   - "40" in name → 40%
-   - "60" in name → 60%
-   - "80" in name → 80%
-   - "no_" prefix → Removed
-   - "full" → Full
+   - "40" in name -> 40%
+   - "60" in name -> 60%
+   - "80" in name -> 80%
+   - "no_" prefix -> Removed
+   - "full" -> Full
 
 3. Compute mean mutation score (%) by test strength
 4. Export pivoted table (rows=strength, columns=metrics)
@@ -283,10 +393,158 @@ OUTPUTS:
 - Console output: Formatted table with mutation scores
 
 EXPECTED PATTERN:
-- Monotonic increase: 40% < 60% < 80% ≤ Full
+- Monotonic increase: 40% < 60% < 80% <= Full
 - Removed sets < Full (typically 6-15% lower)
 - Equalized Odds shows steepest increase
 - Validates adequacy metric meaningfulness
+
+--------------------------------------------------------------------------------
+FILE 5: generate_graph_baseline_comparison.py - RQ2 VISUALIZATION
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Generates a publication-quality grouped bar chart comparing Spearman correlation 
+coefficients across all adequacy criteria for the three fairness metrics 
+(Demographic Parity, Equal Opportunity, Equalized Odds).
+
+RESEARCH QUESTION SUPPORTED:
+RQ2 - "How does the mutation-based approach perform compared to baseline 
+approaches for fairness test adequacy?"
+
+FUNCTIONALITY:
+
+1. DATA LOADING:
+   - Loads correlation results from three CSV files:
+     * final_correlation_ALL_TESTSETS_demographic_parity.csv
+     * final_correlation_ALL_TESTSETS_equal_oppurtunity.csv
+     * final_correlation_ALL_TESTSETS_equalized_odd.csv
+   - Extracts "Adequacy Criterion" and "Spearman rho" columns from each file
+
+2. DATA MERGING:
+   - Merges all three datasets on "Adequacy Criterion" column
+   - Renames Spearman correlation columns to distinguish metrics:
+     * Spearman_rho_DP (Demographic Parity)
+     * Spearman_rho_EO (Equal Opportunity)
+     * Spearman_rho_EOd (Equalized Odds)
+
+3. ORDERING:
+   - Applies preferred display order for adequacy criteria:
+     1. Mutation Based (our proposed approach)
+     2. Combinatorial Coverage
+     3. Distributional Balance
+     4. Distance to Training
+     5. Individual Discrimination Index
+     6. Decision Boundary Coverage
+
+4. VISUALIZATION:
+   - Creates grouped bar chart with three bars per adequacy criterion
+   - Bar width: 0.25 (three bars side-by-side)
+   - Horizontal reference line at y=0 for visual clarity
+   - X-axis: Adequacy criteria (rotated 45 degrees for readability)
+   - Y-axis: Spearman correlation coefficient (rho)
+
+OUTPUT:
+- rq2_correlation_all_metrics.png: High-resolution grouped bar chart showing 
+  correlation comparison across all fairness metrics
+
+INTERPRETATION:
+The generated figure visually demonstrates that mutation-based adequacy 
+consistently achieves the highest positive correlation with fault detection 
+across all three fairness metrics, while baseline approaches show variable 
+and often weaker correlations. This provides visual support for the claim 
+that mutation-based adequacy is a superior predictor of fairness fault 
+detection capability.
+
+USAGE:
+1. Ensure correlation CSV files are in the working directory
+2. Run: python generate_graph_baseline_comparison.py
+3. Output saved as: rq2_correlation_all_metrics.png
+
+DEPENDENCIES:
+- pandas: Data loading and manipulation
+- numpy: Numerical operations for bar positioning
+- matplotlib: Visualization and figure generation
+
+--------------------------------------------------------------------------------
+FILE 6: heat_map_result.py - RQ1 VISUALIZATION
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Generates publication-quality heatmaps showing mutation scores (%) across 
+all combinations of ML models and mutation operators for each fairness metric.
+
+RESEARCH QUESTION SUPPORTED:
+RQ1 - "How effective is the proposed fairness test adequacy approach in 
+detecting fairness violations across different ML models, datasets, and 
+mutation operators?"
+
+FUNCTIONALITY:
+
+1. DATA LOADING:
+   - Loads master summary CSV files for each fairness metric:
+     * master_summary_demographic_parity.csv
+     * master_summary_equal_oppurtunity.csv
+     * master_summary_equalized_odd.csv
+
+2. AGGREGATION:
+   - Groups data by (Model, Operator) combinations
+   - Computes mean mutation score for each combination
+   - Converts scores to percentage scale (0-100%)
+   - Rounds values to one decimal place for display
+
+3. PIVOT TABLE CREATION:
+   - Creates a 2D matrix with:
+     * Rows: ML model names (Decision Tree, Gradient Boosting, KNN, 
+       Logistic Regression, Random Forest)
+     * Columns: Mutation operator names (counterfactual_swap, drift, 
+       group_corruption, instance_removal, etc.)
+   - Sorts both rows and columns alphabetically
+   - Fills missing values with 0 for visual consistency
+
+4. HEATMAP VISUALIZATION:
+   - Color scheme: "Blues" colormap (light to dark blue)
+   - Value range: 0-100% (fixed scale for cross-metric comparability)
+   - Cell annotations: Exact mutation score values displayed in each cell
+   - Adaptive text color: White text for dark cells (>60% of max), 
+     black text for light cells (improved readability)
+
+5. MULTIPLE OUTPUT GENERATION:
+   - Processes all three fairness metrics in a single run
+   - Generates separate heatmap for each metric
+
+OUTPUTS:
+- heatmap_demographic_parity_fixed.png: Heatmap for Demographic Parity metric
+- heatmap_equal_opportunity_fixed.png: Heatmap for Equal Opportunity metric
+- heatmap_equalized_odds_fixed.png: Heatmap for Equalized Odds metric
+
+INTERPRETATION:
+The heatmaps provide a comprehensive visual summary of mutation score patterns:
+- High scores (dark blue): Mutation operators that effectively reveal fairness 
+  faults detectable by the test suite
+- Low scores (light blue/white): Operators producing mutants that survive 
+  (potential gaps in test coverage)
+- Cross-model comparison: Identifies which models are more sensitive to 
+  specific types of fairness perturbations
+- Cross-operator comparison: Reveals which mutation operators are most 
+  effective for each model type
+
+USAGE:
+1. Ensure master_summary CSV files are in the working directory
+2. Run: python heat_map_result.py
+3. Three heatmap PNG files are generated in the current directory
+
+DEPENDENCIES:
+- pandas: Data loading, grouping, and pivot table creation
+- numpy: Numerical operations and array handling
+- matplotlib: Heatmap visualization and figure generation
+
+EXAMPLE OUTPUT STRUCTURE:
+                    counterfactual  drift  group_corruption  instance_removal  ...
+decision_tree            45.2       67.8       72.1              58.3          ...
+gradient_boosting        52.1       71.4       78.9              63.7          ...
+knn                      38.9       59.2       65.4              51.8          ...
+logistic_regression      49.7       68.5       74.2              60.1          ...
+random_forest            51.3       70.9       77.5              62.4          ...
 
 ================================================================================
 USAGE INSTRUCTIONS
@@ -308,6 +566,7 @@ STEP 1: PREPARE ENVIRONMENT
 
 3. Update file paths in each script:
    - main.py: TRAIN_FILE, TEST_FILE, OUTPUT_ROOT
+   - get_rq2_graph.py: COMPAS_FILE, OUTPUT_ROOT
    - result_compare_mutation_baseline.py: OUTPUT_ROOT, TRAIN_PATH, TEST_PATH
    - get_rq3_answer.py: FILES dictionary with CSV paths
 
@@ -317,8 +576,11 @@ STEP 2: RUN RQ1 - MUTATION-BASED ADEQUACY EVALUATION
 
 PURPOSE: Generate mutation scores across models, operators, and fairness metrics
 
-COMMAND:
+COMMAND (Generic):
 python main.py
+
+COMMAND (COMPAS-specific):
+python get_rq2_graph.py
 
 EXECUTION TIME: 
 - Adult dataset: ~3.2 hours (48K instances)
@@ -395,12 +657,12 @@ OUTPUTS (in OUTPUT_ROOT):
 - model.pkl: Trained logistic regression model (for IDI/Boundary baselines)
 
 INTERPRETATION:
-- Spearman ρ closer to 1.0 = stronger predictive power
+- Spearman rho closer to 1.0 = stronger predictive power
 - Statistical significance: *** p<0.001, ** p<0.01, * p<0.05
 - 95% confidence intervals shown in brackets
 
 EXPECTED OUTPUT FORMAT:
-Adequacy Criterion               Category            Metric        Spearman ρ  Valid Pairs
+Adequacy Criterion               Category            Metric        Spearman rho  Valid Pairs
 Mutation Score (OURS)           Fault-Based         MutationAdeq.    0.68***      107
 Combinatorial Coverage          Coverage-Based      DatasetCov.      0.40***      107
 Distributional Balance          Distribution-Based  BalanceToFull    0.31**       107
@@ -409,7 +671,74 @@ Individual Discrimination IDX   Counterfactual      IDI_Percentage  -0.17       
 Decision Boundary Coverage      Boundary-Based      BoundaryCov.     0.05         107
 
 --------------------------------------------------------------------------------
-STEP 4: RUN RQ3 - TEST SET STRENGTH ANALYSIS
+STEP 4: RUN RQ2 VISUALIZATION - BASELINE COMPARISON GRAPH
+--------------------------------------------------------------------------------
+
+PURPOSE: Generate publication-quality bar chart comparing correlation coefficients
+
+PREREQUISITES:
+- RQ2 must be completed for all three fairness metrics
+- Required files in working directory:
+  * final_correlation_ALL_TESTSETS_demographic_parity.csv
+  * final_correlation_ALL_TESTSETS_equal_oppurtunity.csv
+  * final_correlation_ALL_TESTSETS_equalized_odd.csv
+
+COMMAND:
+python generate_graph_baseline_comparison.py
+
+EXECUTION TIME: <1 minute (visualization only)
+
+CONFIGURATION:
+- Update file paths (dp_file, eo_file, eod_file) if using different naming
+- Adjust preferred_order list to change bar ordering
+- Modify figure dimensions if needed (default: 7.0 x 3.5 inches)
+
+OUTPUTS:
+- rq2_correlation_all_metrics.png: Grouped bar chart (600 DPI, PeerJ-compliant)
+
+VISUALIZATION FEATURES:
+- Three bars per adequacy criterion (DP, EO, EOd)
+- Horizontal reference line at y=0
+- Rotated x-axis labels for readability
+- Legend identifying each fairness metric
+
+--------------------------------------------------------------------------------
+STEP 5: RUN RQ1 VISUALIZATION - MUTATION SCORE HEATMAPS
+--------------------------------------------------------------------------------
+
+PURPOSE: Generate publication-quality heatmaps showing mutation scores by 
+model and operator combinations
+
+PREREQUISITES:
+- RQ1 must be completed for all three fairness metrics
+- Required files in working directory:
+  * master_summary_demographic_parity.csv
+  * master_summary_equal_oppurtunity.csv
+  * master_summary_equalized_odd.csv
+
+COMMAND:
+python heat_map_result.py
+
+EXECUTION TIME: <1 minute (visualization only)
+
+CONFIGURATION:
+- Update paths dictionary if using different file naming
+- Adjust figure dimensions if needed (default: 7.0 x 4.5 inches)
+- Modify colormap if desired (default: "Blues")
+
+OUTPUTS:
+- heatmap_demographic_parity_fixed.png
+- heatmap_equal_opportunity_fixed.png
+- heatmap_equalized_odds_fixed.png
+
+VISUALIZATION FEATURES:
+- Color-coded cells (darker = higher mutation score)
+- Exact values annotated in each cell
+- Adaptive text color for readability
+- Colorbar with percentage scale (0-100%)
+
+--------------------------------------------------------------------------------
+STEP 6: RUN RQ3 - TEST SET STRENGTH ANALYSIS
 --------------------------------------------------------------------------------
 
 PURPOSE: Validate monotonic relationship between test strength and adequacy
@@ -446,10 +775,10 @@ Removed                61.64              61.10            69.55
 Full                   63.99              64.66            78.49
 
 KEY VALIDATION:
-- Monotonic increase: 40% < 60% < 80% ≤ Full (✓)
-- Removed < Full in most cases (✓)
-- Equalized Odds highest scores (✓)
-- Improvement range: 6-15% from 40% to Full (✓)
+- Monotonic increase: 40% < 60% < 80% <= Full (check)
+- Removed < Full in most cases (check)
+- Equalized Odds highest scores (check)
+- Improvement range: 6-15% from 40% to Full (check)
 
 ================================================================================
 REQUIREMENTS
@@ -469,7 +798,7 @@ torch>=1.9.0                 # PyTorch (GPU support optional)
 xgboost>=1.4.0              # Gradient Boosting
 
 UTILITIES:
-matplotlib>=3.4.0            # Visualization (optional)
+matplotlib>=3.4.0            # Visualization (required for heatmaps and graphs)
 seaborn>=0.11.0             # Statistical plots (optional)
 
 INSTALL ALL:
@@ -506,7 +835,7 @@ MUTATION-BASED ADEQUACY FRAMEWORK:
 
 2. DISTRIBUTIONAL FILTERING:
    - Compute distribution shift score between original and mutated training data
-   - Filter mutants where shift exceeds τ = 5%
+   - Filter mutants where shift exceeds tau = 5%
    - Prevents unrealistic perturbations and confounding effects
    - Metrics: L1 distance (categorical), standardized mean difference (numeric)
 
@@ -518,15 +847,15 @@ MUTATION-BASED ADEQUACY FRAMEWORK:
 4. FAIRNESS EVALUATION:
    - Compute group fairness metrics on baseline and mutant predictions
    - For each sensitive group g and metric F:
-     Δ_g = |F_g(M) - F_g(M')|
+     Delta_g = |F_g(M) - F_g(M')|
    
 5. MUTANT CLASSIFICATION:
-   - Detection threshold: θ = μ_Δ + k·σ_Δ (k=1.5)
-   - Mutant "killed" if max_g(Δ_g) > θ
+   - Detection threshold: theta = mean + k*std (k=1.5)
+   - Mutant "killed" if max_g(Delta_g) > theta
    - Otherwise "alive"
 
 6. ADEQUACY QUANTIFICATION:
-   - Mutation Score = (# killed) / (# total valid mutants) × 100%
+   - Mutation Score = (# killed) / (# total valid mutants) x 100%
    - Higher scores indicate stronger fault-detection capability
 
 STATISTICAL VALIDATION:
@@ -548,36 +877,36 @@ INTERPRETATION GUIDE
 MUTATION SCORE INTERPRETATION:
 
 High-Stakes Domains (criminal justice, lending, healthcare):
-→ Target: ≥80% under Equalized Odds
-→ Indicates: Strong fault-detection capability
-→ Action: Deploy with confidence, monitor continuously
+-> Target: >=80% under Equalized Odds
+-> Indicates: Strong fault-detection capability
+-> Action: Deploy with confidence, monitor continuously
 
 Medium-Stakes Domains (advertising, recommendations):
-→ Target: 60-80% under Equal Opportunity or Equalized Odds
-→ Indicates: Reasonable adequacy
-→ Action: Deploy with monitoring, plan periodic re-evaluation
+-> Target: 60-80% under Equal Opportunity or Equalized Odds
+-> Indicates: Reasonable adequacy
+-> Action: Deploy with monitoring, plan periodic re-evaluation
 
 Lower-Stakes Domains (entertainment, non-personalized):
-→ Target: 40-60% under Demographic Parity
-→ Indicates: Baseline adequacy
-→ Action: Deploy with awareness, investigate if violations detected
+-> Target: 40-60% under Demographic Parity
+-> Indicates: Baseline adequacy
+-> Action: Deploy with awareness, investigate if violations detected
 
 OPERATOR-LEVEL INSIGHTS:
 
 High Kill Rates (70-100%):
 - Instance-level operators (instance_removal, intersectional_instance)
 - Distributional operators (drift, group_corruption, noise_injection)
-→ Test suite effectively detects group representation issues
+-> Test suite effectively detects group representation issues
 
 Medium Kill Rates (40-70%):
 - Sampling operators (oversample, undersample)
 - Label-based operators (label_flip)
-→ Test suite partially adequate, consider augmentation
+-> Test suite partially adequate, consider augmentation
 
 Low Kill Rates (<40%):
 - Structural operators (counterfactual_swap, column_removal)
-→ Test suite may lack adversarial or proxy-sensitive coverage
-→ Consider targeted augmentation
+-> Test suite may lack adversarial or proxy-sensitive coverage
+-> Consider targeted augmentation
 
 FAIRNESS METRIC PATTERNS:
 
@@ -588,17 +917,17 @@ Equalized Odds > Equal Opportunity > Demographic Parity:
 
 CORRELATION INTERPRETATION (RQ2):
 
-ρ ≥ 0.7: Strong predictive power (Mutation Score typically achieves this)
-0.5 ≤ ρ < 0.7: Moderate predictive power
-0.3 ≤ ρ < 0.5: Weak predictive power
-ρ < 0.3: Poor predictive power (most baselines fall here)
+rho >= 0.7: Strong predictive power (Mutation Score typically achieves this)
+0.5 <= rho < 0.7: Moderate predictive power
+0.3 <= rho < 0.5: Weak predictive power
+rho < 0.3: Poor predictive power (most baselines fall here)
 
-Negative ρ: Anti-correlated (e.g., Distance to Training)
-→ Higher novelty → lower fault detection
+Negative rho: Anti-correlated (e.g., Distance to Training)
+-> Higher novelty -> lower fault detection
 
 TEST STRENGTH VALIDATION (RQ3):
 
-Expected Pattern: 40% < 60% < 80% ≤ Full
+Expected Pattern: 40% < 60% < 80% <= Full
 - Monotonic increase validates adequacy meaningfulness
 - Non-monotonic patterns suggest:
   * Insufficient mutant diversity
@@ -639,9 +968,9 @@ RESPONDING TO LOW SCORES:
 If Mutation Score < 60%:
 1. Identify low-kill-rate operators (operator_summary.csv)
 2. Augment test set to address gaps:
-   - Low instance_removal → Add minority subsamples
-   - Low drift → Include temporal/regional variants
-   - Low intersectional → Oversample intersections
+   - Low instance_removal -> Add minority subsamples
+   - Low drift -> Include temporal/regional variants
+   - Low intersectional -> Oversample intersections
 3. Re-evaluate and verify improvement (target: +15-20%)
 
 If Correlation < 0.5 (RQ2):
@@ -658,7 +987,7 @@ PRODUCTION INTEGRATION:
 
 Pre-Deployment:
 - Run comprehensive evaluation (all operators)
-- Require ≥80% for high-stakes, ≥60% for medium-stakes
+- Require >=80% for high-stakes, >=60% for medium-stakes
 - Document mutation scores in model cards
 
 Continuous Monitoring:
@@ -694,8 +1023,8 @@ COMMON ISSUES:
 1. MEMORY ERROR (MemoryError or OOM):
    Cause: Too many mutants or large feature space
    Solution:
-   - Reduce MAX_MUTANTS (e.g., 5000 → 2000)
-   - Reduce MAX_PER_OPERATOR (e.g., 20 → 10)
+   - Reduce MAX_MUTANTS (e.g., 5000 -> 2000)
+   - Reduce MAX_PER_OPERATOR (e.g., 20 -> 10)
    - Process operators sequentially instead of batch
    - Enable ENABLE_* flags selectively
 
@@ -704,7 +1033,7 @@ COMMON ISSUES:
    Solution:
    - Verify distribution filtering (HIGH_SHIFT_THRESHOLD)
    - Check operator diversity (operator_summary.csv)
-   - Reduce k threshold (1.5 → 1.0 for sensitivity analysis)
+   - Reduce k threshold (1.5 -> 1.0 for sensitivity analysis)
    - Inspect killed vs. alive breakdown by operator
 
 3. ALL MUTANTS ALIVE (Score = 0%):
@@ -713,12 +1042,12 @@ COMMON ISSUES:
    - Verify test set has sufficient sensitive groups (MIN_GROUP_SIZE)
    - Check if model uses sensitive attributes (SHAP/feature importance)
    - Examine fairness metric distributions (may be perfectly fair)
-   - Lower k threshold experimentally (1.5 → 0.5)
+   - Lower k threshold experimentally (1.5 -> 0.5)
 
 4. DISTRIBUTION SHIFT TOO HIGH (All mutants filtered):
    Cause: Aggressive operators or small dataset
    Solution:
-   - Increase HIGH_SHIFT_THRESHOLD (5.0 → 7.5)
+   - Increase HIGH_SHIFT_THRESHOLD (5.0 -> 7.5)
    - Disable heavy operators (ENABLE_COUNTERFACTUAL_SWAP = False)
    - Use stratified sampling in operators
    - Check operator implementation for bugs
@@ -735,9 +1064,9 @@ COMMON ISSUES:
    Cause: Stochastic models or insufficient seeds
    Solution:
    - Set RANDOM_STATE consistently (42)
-   - Increase random seed range (10 seeds → 20 seeds)
+   - Increase random seed range (10 seeds -> 20 seeds)
    - Use deterministic training modes where available
-   - Report mean ± std across multiple runs
+   - Report mean +/- std across multiple runs
 
 7. MISMATCHED TEST SET NAMES (RQ3):
    Cause: Naming convention mismatch
@@ -764,8 +1093,27 @@ COMMON ISSUES:
     Cause: Missing dependencies
     Solution:
     - Install all requirements: pip install -r requirements.txt
-    - Verify Python version: python --version (≥3.8)
+    - Verify Python version: python --version (>=3.8)
     - Check package versions: pip list
+
+11. VISUALIZATION FILE NOT FOUND ERRORS:
+    Cause: CSV files not in expected location for graph/heatmap scripts
+    Solution:
+    - Verify all correlation CSV files exist before running 
+      generate_graph_baseline_comparison.py
+    - Verify all master_summary CSV files exist before running 
+      heat_map_result.py
+    - Update file paths in the scripts to match your directory structure
+    - Ensure file names match exactly (check for typos like 
+      "oppurtunity" vs "opportunity")
+
+12. HEATMAP DISPLAY ISSUES:
+    Cause: Missing data or incompatible column names
+    Solution:
+    - Verify master_summary.csv contains "Model", "Operator", and 
+      "MutationScore" columns
+    - Check for NaN values in MutationScore column
+    - Ensure at least one row exists per Model-Operator combination
 
 ================================================================================
 CITATIONS
@@ -776,7 +1124,7 @@ If you use this code or methodology in your research, please cite:
 @article{akinola2026mutation,
   title={Mutation-Based Fairness Test Adequacy for Machine Learning Systems},
   author={Akinola, Kehinde and Srinivasan, Madhusudan},
-  journal={PEERJ Journal},
+  journal={PeerJ Computer Science},
   year={2026},
   note={Under review}
 }

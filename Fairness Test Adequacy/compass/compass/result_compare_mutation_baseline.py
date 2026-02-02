@@ -1,7 +1,4 @@
-# ============================================================
-# FINAL FULLY WORKING SCRIPT – COMPAS DATASET (FIXED)
 # 70/30 in-memory split + ALL test sets + ALL 7 baseline metrics
-# NO ERRORS – READY TO RUN
 # ============================================================
 
 import os

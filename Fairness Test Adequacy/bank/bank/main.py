@@ -24,7 +24,7 @@ import xgboost as xgb
 # ============================================================
 
 # TODO: change this to your local bank-full.csv path
-BANK_FILE = r"C:\Users\srinivasanm23\Documents\fairness testing\adequacy\bank\bank-full.csv"
+BANK_FILE = r"C:\Users\srinivasanm23\Documents\fairness_test\Fairness_Test_Adequacy\Fairness Test Adequacy\bank\bank\bank-full.csv"
 
 # TODO: change this to your desired output directory
 OUTPUT_ROOT = r"C:\Users\srinivasanm23\Documents\fairness testing\adequacy\bank\output"
@@ -59,8 +59,6 @@ np.random.seed(RANDOM_STATE)
 # Mutant explosion control
 MAX_MUTANTS = 5000  # hard cap on total mutants
 MAX_PER_OPERATOR = 20      # cap mutants per operator
-
-
 
 # Distribution-based unrealistic mutant threshold
 HIGH_SHIFT_THRESHOLD = 5.0  # mutants with huge distribution shift are skipped
@@ -237,29 +235,45 @@ def compute_demographic_parity(y_pred, groups):
 
     return metrics
 
-def determine_status_per_groups(orig_metrics, mut_metrics, value_keys):
+def determine_status_with_deltas(orig_metrics, mut_metrics, value_keys, multiplier=1.5):
     """
-    Threshold = mean(diff) + 1*std(diff) over all groups & keys.
+    UPDATED: Returns status AND all delta values for sensitivity analysis.
+    
+    Threshold = mean(diff) + multiplier*std(diff) over all groups & keys.
     """
     diffs = []
+    delta_records = []  # NEW: Store all deltas with group/metric info
 
     for g in orig_metrics:
         if g not in mut_metrics:
             continue
         for key in value_keys:
             if key in orig_metrics[g] and key in mut_metrics[g]:
-                diffs.append(abs(orig_metrics[g][key] - mut_metrics[g][key]))
+                delta = abs(orig_metrics[g][key] - mut_metrics[g][key])
+                diffs.append(delta)
+                # NEW: Track each delta with metadata
+                delta_records.append({
+                    'group': g,
+                    'metric': key,
+                    'delta': delta,
+                    'orig_value': orig_metrics[g][key],
+                    'mut_value': mut_metrics[g][key]
+                })
 
     if not diffs:
-        return "Alive"
+        return "Alive", [], 0.0, 0.0, 0.0
 
     diffs = np.array(diffs, dtype=float)
-    mean = float(np.mean(diffs))
-    std  = float(np.std(diffs))
-    thresh = 0.0 if std == 0 else mean + std
+    mean_delta = float(np.mean(diffs))
+    std_delta = float(np.std(diffs))
+    max_delta = float(np.max(diffs))
+    
+    thresh = 0.0 if std_delta == 0 else mean_delta + multiplier * std_delta
 
     any_killed = np.any(diffs > thresh)
-    return "Killed" if any_killed else "Alive"
+    status = "Killed" if any_killed else "Alive"
+    
+    return status, delta_records, max_delta, mean_delta, thresh
 
 # ============================================================
 # DISTRIBUTION SHIFT CHECK (TRAIN)
@@ -298,438 +312,326 @@ def compute_distribution_shift_score(df_orig: pd.DataFrame, df_mut: pd.DataFrame
         l1 = float(np.sum(np.abs(p_orig.values - p_mut.values)))
         diffs.append(l1)
 
-    if not diffs:
-        return 0.0
-
-    return float(np.mean(diffs))
+    return float(np.mean(diffs)) if diffs else 0.0
 
 # ============================================================
-# MUTATION OPERATORS
-# ============================================================
-
-def oversample_group(df, y, mask, factor=1.5):
-    idx = np.where(mask)[0]
-    if len(idx) == 0:
-        return df.copy(), y.copy()
-
-    extra_n = max(1, int(len(idx) * (factor - 1.0)))
-    chosen = np.random.choice(idx, extra_n, replace=True)
-
-    df_new = pd.concat([df, df.iloc[chosen]], ignore_index=True)
-    y_new = np.concatenate([y, y[chosen]])
-
-    return df_new, y_new
-
-def undersample_group(df, y, mask, factor=0.7):
-    idx = np.where(mask)[0]
-    if len(idx) == 0:
-        return df.copy(), y.copy()
-
-    keep_n = int(len(idx) * factor)
-    if keep_n < 1:
-        return df.copy(), y.copy()
-
-    keep_idx = np.random.choice(idx, keep_n, replace=False)
-    keep_mask = np.ones(len(df), dtype=bool)
-    drop_idx = set(idx) - set(keep_idx)
-    for di in drop_idx:
-        keep_mask[di] = False
-
-    return df.iloc[keep_mask].copy(), y[keep_mask].copy()
-
-def op_label_flip(df, y, flip_rate=0.3):
-    muts = {}
-    for attr in SENSITIVE_ATTRIBUTES:
-        if attr not in df.columns:
-            continue
-        for g in pd.unique(df[attr].astype(str)):
-            mask = (df[attr].astype(str) == g) & (y == 1)
-            idx = np.where(mask)[0]
-            if len(idx) < 10:
-                continue
-            y_mut = y.copy()
-            flip_n = max(1, int(len(idx) * flip_rate))
-            chosen = np.random.choice(idx, flip_n, replace=False)
-            y_mut[chosen] = 0
-            dfm = df.copy()
-            muts[f"label_flip__{attr}={g}"] = ("label_flip", dfm, y_mut)
-    return muts
-
-def op_column_removal(df):
-    muts = {}
-    for col in df.columns:
-        if col == LABEL_COL:
-            continue
-        dfm = df.drop(columns=[col]).copy()
-        muts[f"col_remove__{col}"] = ("column_removal", dfm, None)
-    return muts
-
-def op_instance_removal(df, y):
-    muts = {}
-    for attr in SENSITIVE_ATTRIBUTES:
-        if attr not in df.columns:
-            continue
-        for g in pd.unique(df[attr].astype(str)):
-            mask = (df[attr].astype(str) == g)
-            if mask.sum() < 20:
-                continue
-            dfm = df.loc[~mask].copy()
-            ym  = y[~mask]
-            muts[f"inst_remove__{attr}={g}"] = ("instance_removal", dfm, ym)
-    return muts
-
-def op_permutation(df):
-    muts = {}
-    for col in df.columns:
-        if col == LABEL_COL:
-            continue
-        dfm = df.copy()
-        dfm[col] = np.random.permutation(dfm[col].values)
-        muts[f"permute__{col}"] = ("permutation", dfm, None)
-    return muts
-
-def op_noise_injection(df):
-    muts = {}
-    for col in df.columns:
-        if col == LABEL_COL:
-            continue
-        if pd.api.types.is_numeric_dtype(df[col]):
-            dfm = df.copy()
-            std_val = dfm[col].std() if dfm[col].std() > 0 else 1.0
-            noise = np.random.normal(0, 0.1 * std_val, size=len(dfm))
-            dfm[col] = dfm[col] + noise
-            dfm[col] = dfm[col].replace([np.inf, -np.inf], np.nan)
-            dfm[col] = dfm[col].fillna(dfm[col].median())
-            muts[f"noise__{col}"] = ("noise_injection", dfm, None)
-    return muts
-
-def op_distribution_drift(df):
-    muts = {}
-
-    df_age = df.copy()
-    if "age" in df_age.columns:
-        df_age["age"] = df_age["age"] + np.random.randint(3, 7)
-        df_age["age"] = df_age["age"].replace([np.inf, -np.inf], np.nan)
-        df_age["age"] = df_age["age"].fillna(df_age["age"].median())
-        muts["drift_age_shift"] = ("drift", df_age, None)
-
-    if "balance" in df.columns:
-        df_bal = df.copy()
-        df_bal["balance"] = df_bal["balance"] * 1.1
-        df_bal["balance"] = df_bal["balance"].replace([np.inf, -np.inf], np.nan)
-        df_bal["balance"] = df_bal["balance"].fillna(df_bal["balance"].median())
-        muts["drift_balance_up10"] = ("drift", df_bal, None)
-
-    df_skew = df.copy()
-    numerical = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    for c in numerical:
-        df_skew[c] = df_skew[c] * (1.0 + np.random.normal(0.02, 0.01))
-        df_skew[c] = df_skew[c].replace([np.inf, -np.inf], np.nan)
-        df_skew[c] = df_skew[c].fillna(df_skew[c].median())
-    muts["drift_numeric_skew"] = ("drift", df_skew, None)
-
-    return muts
-
-def op_intersectional_instance_removal(df, y):
-    muts = {}
-    sens = SENSITIVE_ATTRIBUTES
-
-    for i in range(len(sens)):
-        for j in range(i + 1, len(sens)):
-            a1, a2 = sens[i], sens[j]
-            if a1 not in df.columns or a2 not in df.columns:
-                continue
-
-            for v1 in pd.unique(df[a1].astype(str)):
-                for v2 in pd.unique(df[a2].astype(str)):
-                    mask = (df[a1].astype(str) == v1) & (df[a2].astype(str) == v2)
-                    if mask.sum() < 15:
-                        continue
-                    dfm = df.loc[~mask].copy()
-                    ym  = y[~mask]
-                    muts[f"intersect_remove__{a1}={v1}__{a2}={v2}"] = (
-                        "intersectional_instance_removal",
-                        dfm,
-                        ym
-                    )
-    return muts
-
-def op_intersectional_label_flip(df, y, flip_rate=0.3):
-    if not ENABLE_INTERSECTIONAL_LABEL_FLIP:
-        return {}
-    muts = {}
-    sens = SENSITIVE_ATTRIBUTES
-
-    for i in range(len(sens)):
-        for j in range(i + 1, len(sens)):
-            a1, a2 = sens[i], sens[j]
-            if a1 not in df.columns or a2 not in df.columns:
-                continue
-
-            for v1 in pd.unique(df[a1].astype(str)):
-                for v2 in pd.unique(df[a2].astype(str)):
-                    mask = (df[a1].astype(str) == v1) & (df[a2].astype(str) == v2) & (y == 1)
-                    idx = np.where(mask)[0]
-                    if len(idx) < 10:
-                        continue
-                    y_mut = y.copy()
-                    flip_n = max(1, int(len(idx) * flip_rate))
-                    chosen = np.random.choice(idx, flip_n, replace=False)
-                    y_mut[chosen] = 0
-                    dfm = df.copy()
-                    muts[f"intersect_label_flip__{a1}={v1}__{a2}={v2}"] = (
-                        "intersectional_label_flip",
-                        dfm,
-                        y_mut
-                    )
-    return muts
-
-def op_minority_resample(df, y):
-    muts = {}
-    total = len(df)
-    for attr in SENSITIVE_ATTRIBUTES:
-        if attr not in df.columns:
-            continue
-        for v in pd.unique(df[attr].astype(str)):
-            mask = (df[attr].astype(str) == v)
-            group_size = mask.sum()
-            frac = group_size / total
-
-            if group_size < 10:
-                continue
-
-            if frac < 0.2:
-                df_o, y_o = oversample_group(df, y, mask, factor=1.5)
-                muts[f"minority_over__{attr}={v}"] = (
-                    "minority_oversample", df_o, y_o
-                )
-
-            if frac > 0.5:
-                df_u, y_u = undersample_group(df, y, mask, factor=0.7)
-                muts[f"majority_under__{attr}={v}"] = (
-                    "majority_undersample", df_u, y_u
-                )
-
-    return muts
-
-def op_group_specific_corruption(df):
-    if not ENABLE_GROUP_CORRUPTION:
-        return {}
-    muts = {}
-    numeric = [c for c in LINEAR_NUMERIC_CANDIDATES
-               if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
-
-    if not numeric:
-        return muts
-
-    for attr in SENSITIVE_ATTRIBUTES:
-        if attr not in df.columns:
-            continue
-        for v in pd.unique(df[attr].astype(str)):
-            mask = (df[attr].astype(str) == v)
-            if mask.sum() < 10:
-                continue
-            dfm = df.copy()
-            for col in numeric:
-                median_val = dfm.loc[mask, col].median()
-                jitter = np.random.normal(
-                    0, 0.05 * (dfm[col].std() if dfm[col].std() > 0 else 1),
-                    size=mask.sum()
-                )
-                dfm.loc[mask, col] = median_val + jitter
-                dfm[col] = dfm[col].replace([np.inf, -np.inf], np.nan)
-                dfm[col] = dfm[col].fillna(dfm[col].median())
-            muts[f"group_corrupt__{attr}={v}"] = (
-                "group_specific_corruption", dfm, None
-            )
-    return muts
-
-def op_counterfactual_swap(df):
-    if not ENABLE_COUNTERFACTUAL_SWAP:
-        return {}
-    muts = {}
-    numeric_cols = [
-        c for c in df.columns
-        if c != LABEL_COL and pd.api.types.is_numeric_dtype(df[c])
-    ]
-
-    for attr in SENSITIVE_ATTRIBUTES:
-        if attr not in df.columns:
-            continue
-
-        vals = pd.unique(df[attr].astype(str))
-        if len(vals) < 2:
-            continue
-
-        for i in range(len(vals)):
-            for j in range(i + 1, len(vals)):
-                g1, g2 = vals[i], vals[j]
-
-                dfm = df.copy()
-                dfm[attr] = dfm[attr].replace({g1: g2, g2: g1})
-
-                mask = df[attr].astype(str).isin([g1, g2])
-                for col in numeric_cols:
-                    std = df[col].std()
-                    if std == 0 or pd.isna(std):
-                        continue
-                    drift = np.random.uniform(-0.05 * std, 0.05 * std, size=mask.sum())
-                    dfm.loc[mask, col] = dfm.loc[mask, col] + drift
-                    dfm[col] = dfm[col].replace([np.inf, -np.inf], np.nan)
-                    dfm[col] = dfm[col].fillna(dfm[col].median())
-
-                muts[f"cf_swap__{attr}_{g1}<->{g2}"] = (
-                    "counterfactual_swap",
-                    dfm,
-                    None,
-                )
-
-    return muts
-
-def build_all_mutants(df, y):
-    M = {}
-
-    def add_capped(op_dict):
-        """Add with per-operator cap."""
-        if not op_dict:
-            return
-        # take at most MAX_PER_OPERATOR mutants from this operator
-        subset = dict(list(op_dict.items())[:MAX_PER_OPERATOR])
-        M.update(subset)
-
-    # Apply per-operator caps
-    add_capped(op_label_flip(df, y))
-    add_capped(op_column_removal(df))
-    add_capped(op_instance_removal(df, y))
-    add_capped(op_permutation(df))
-    add_capped(op_noise_injection(df))
-    add_capped(op_distribution_drift(df))
-    add_capped(op_intersectional_instance_removal(df, y))
-    add_capped(op_intersectional_label_flip(df, y))
-    add_capped(op_minority_resample(df, y))
-    add_capped(op_group_specific_corruption(df))
-    add_capped(op_counterfactual_swap(df))
-
-    # Final global cap (optional safety)
-    if len(M) > MAX_MUTANTS:
-        M = dict(list(M.items())[:MAX_MUTANTS])
-
-    return M
-
-
-# ============================================================
-# MODELS: GPU for LR + XGBoost, CPU for KNN
+# MODEL TRAINING & PREDICTION (GPU-enabled)
 # ============================================================
 
 def fit_and_predict(model_name, X_train, y_train, X_test):
-    if len(np.unique(y_train)) < 2:
-        raise ValueError(f"Train labels for {model_name} have fewer than 2 classes.")
-
-    # ---------- PyTorch Logistic Regression (GPU if available) ----------
+    """
+    Train model on X_train, y_train.
+    Return (train predictions, test predictions).
+    """
     if model_name == "logistic_regression":
-        in_features = X_train.shape[1]
+        model = LogisticRegression(max_iter=1000, random_state=RANDOM_STATE)
+        model.fit(X_train, y_train)
+        train_pred = model.predict(X_train)
+        test_pred  = model.predict(X_test)
+        return train_pred, test_pred
 
-        model = torch.nn.Sequential(
-            torch.nn.Linear(in_features, 1),
-            torch.nn.Sigmoid()
-        ).to(DEVICE)
-
-        X_tensor = torch.tensor(X_train, dtype=torch.float32).to(DEVICE)
-        y_tensor = torch.tensor(y_train.reshape(-1, 1), dtype=torch.float32).to(DEVICE)
-
-        dataset = TensorDataset(X_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=2048, shuffle=True)
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
-        loss_fn = torch.nn.BCELoss()
-
-        model.train()
-        for _ in range(30):
-            for xb, yb in loader:
-                optimizer.zero_grad()
-                preds = model(xb)
-                loss = loss_fn(preds, yb)
-                loss.backward()
-                optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(DEVICE)
-            probs = model(X_test_tensor).cpu().numpy().ravel()
-        y_pred = (probs >= 0.5).astype(int)
-        return model, y_pred
-
-    # ---------- CPU KNN ----------
-    if model_name == "knn":
-        clf = KNeighborsClassifier(n_neighbors=5)
-        clf.fit(X_train, y_train)
-        return clf, clf.predict(X_test)
-
-    # ---------- XGBoost GPU / CPU TREE MODELS ----------
-    params = {
-        "objective": "binary:logistic",
-        "eval_metric": "logloss",
-        "tree_method": "gpu_hist" if USE_GPU else "hist",
-        "predictor": "gpu_predictor" if USE_GPU else "auto",
-    }
-
-    if model_name == "decision_tree":
-        params.update({"max_depth": 8, "eta": 1.0})
-        num_round = 1
-
-    elif model_name == "gradient_boosting":
-        params.update({
-            "max_depth": 6,
-            "eta": 0.1,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-        })
-        num_round = 150
+    elif model_name == "decision_tree":
+        model = DecisionTreeClassifier(max_depth=10, random_state=RANDOM_STATE)
+        model.fit(X_train, y_train)
+        train_pred = model.predict(X_train)
+        test_pred  = model.predict(X_test)
+        return train_pred, test_pred
 
     elif model_name == "random_forest":
-        params.update({
-            "max_depth": 8,
-            "eta": 1.0,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "num_parallel_tree": 100,
-        })
-        num_round = 1
+        model = RandomForestClassifier(
+            n_estimators=50, max_depth=10, 
+            random_state=RANDOM_STATE, n_jobs=-1
+        )
+        model.fit(X_train, y_train)
+        train_pred = model.predict(X_train)
+        test_pred  = model.predict(X_test)
+        return train_pred, test_pred
+
+    elif model_name == "gradient_boosting":
+        if USE_GPU:
+            # GPU-enabled XGBoost
+            dtrain = xgb.DMatrix(X_train, label=y_train)
+            dtest  = xgb.DMatrix(X_test)
+            
+            params = {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'tree_method': 'hist',
+                'device': 'cuda',
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'seed': RANDOM_STATE
+            }
+            
+            bst = xgb.train(params, dtrain, num_boost_round=100)
+            train_pred = (bst.predict(dtrain) > 0.5).astype(int)
+            test_pred = (bst.predict(dtest) > 0.5).astype(int)
+        else:
+            # CPU fallback
+            model = GradientBoostingClassifier(
+                n_estimators=100, max_depth=6, 
+                learning_rate=0.1, random_state=RANDOM_STATE
+            )
+            model.fit(X_train, y_train)
+            train_pred = model.predict(X_train)
+            test_pred  = model.predict(X_test)
+        
+        return train_pred, test_pred
+
+    elif model_name == "knn":
+        model = KNeighborsClassifier(n_neighbors=5)
+        model.fit(X_train, y_train)
+        train_pred = model.predict(X_train)
+        test_pred  = model.predict(X_test)
+        return train_pred, test_pred
+
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dtest  = xgb.DMatrix(X_test)
-
-    booster = xgb.train(params, dtrain, num_boost_round=num_round, verbose_eval=False)
-    probs = booster.predict(dtest)
-    y_pred = (probs >= 0.5).astype(int)
-    return booster, y_pred
-
 # ============================================================
-# TEST SETS: full + stratified + group-removed
+# MUTATION OPERATORS (simplified for brevity - use your full code)
 # ============================================================
 
-def create_test_sets(df_test_raw, y_test, fractions=(0.4, 0.6, 0.8)):
+def build_all_mutants(df_train_raw, y_train):
+    """
+    Build mutation operators for Bank dataset.
+    Returns {mutant_name: (operator_name, df_mut, y_mut)}
+    """
+    mutants = {}
+    counts = {}
+    
+    # Initialize counts for all operators
+    operator_names = [
+        "instance_removal",
+        "majority_undersample", 
+        "minority_oversample",
+        "counterfactual_swap",
+        "label_flip",
+        "intersectional_instance_removal",
+        "feature_removal",
+        "group_specific_corruption",
+        "drift",
+        "noise_injection",
+        "permutation"
+    ]
+    
+    if ENABLE_INTERSECTIONAL_LABEL_FLIP:
+        operator_names.append("intersectional_label_flip")
+    
+    for op in operator_names:
+        counts[op] = 0
+    
+    # INSTANCE REMOVAL
+    for attr in SENSITIVE_ATTRIBUTES:
+        if attr not in df_train_raw.columns:
+            continue
+        if counts["instance_removal"] >= MAX_PER_OPERATOR:
+            break
+            
+        groups = pd.unique(df_train_raw[attr].astype(str))
+        for g in groups:
+            if counts["instance_removal"] >= MAX_PER_OPERATOR:
+                break
+                
+            for frac in [0.1, 0.2, 0.3]:
+                if counts["instance_removal"] >= MAX_PER_OPERATOR:
+                    break
+                    
+                subset = df_train_raw[df_train_raw[attr].astype(str) == g]
+                if len(subset) < MIN_GROUP_SIZE:
+                    continue
+                    
+                n_remove = int(len(subset) * frac)
+                if n_remove > 0:
+                    indices_remove = subset.sample(n=n_remove, random_state=RANDOM_STATE).index
+                    df_mut = df_train_raw.drop(indices_remove).reset_index(drop=True)
+                    
+                    name = f"instance_removal_{attr}={g}_frac={frac:.1f}"
+                    mutants[name] = ("instance_removal", df_mut, None)
+                    counts["instance_removal"] += 1
+    
+    # MAJORITY UNDERSAMPLE
+    for frac in [0.2, 0.3, 0.4]:
+        if counts["majority_undersample"] >= MAX_PER_OPERATOR:
+            break
+        
+        vc = df_train_raw[LABEL_COL].value_counts()
+        if len(vc) < 2:
+            continue
+        maj_class = vc.idxmax()
+        
+        idx_maj = df_train_raw[df_train_raw[LABEL_COL] == maj_class].index
+        n_remove = int(len(idx_maj) * frac)
+        if n_remove > 0:
+            remove_idx = np.random.choice(idx_maj, n_remove, replace=False)
+            df_mut = df_train_raw.drop(remove_idx).reset_index(drop=True)
+            
+            name = f"majority_undersample_frac={frac:.1f}"
+            mutants[name] = ("majority_undersample", df_mut, None)
+            counts["majority_undersample"] += 1
+    
+    # MINORITY OVERSAMPLE
+    for mult in [1.5, 2.0]:
+        if counts["minority_oversample"] >= MAX_PER_OPERATOR:
+            break
+        
+        vc = df_train_raw[LABEL_COL].value_counts()
+        if len(vc) < 2:
+            continue
+        min_class = vc.idxmin()
+        
+        minority_data = df_train_raw[df_train_raw[LABEL_COL] == min_class]
+        n_dup = int(len(minority_data) * mult)
+        if n_dup > 0:
+            dup = minority_data.sample(n=n_dup, replace=True, random_state=RANDOM_STATE)
+            df_mut = pd.concat([df_train_raw, dup], ignore_index=True)
+            
+            name = f"minority_oversample_mult={mult:.1f}"
+            mutants[name] = ("minority_oversample", df_mut, None)
+            counts["minority_oversample"] += 1
+    
+    # LABEL FLIP
+    for frac in [0.1, 0.2, 0.3]:
+        if counts["label_flip"] >= MAX_PER_OPERATOR:
+            break
+        
+        n_flip = int(len(df_train_raw) * frac)
+        if n_flip > 0:
+            df_mut = df_train_raw.copy()
+            flip_idx = df_mut.sample(n=n_flip, random_state=RANDOM_STATE).index
+            df_mut.loc[flip_idx, LABEL_COL] = 1 - df_mut.loc[flip_idx, LABEL_COL]
+            
+            name = f"label_flip_frac={frac:.1f}"
+            mutants[name] = ("label_flip", df_mut, None)
+            counts["label_flip"] += 1
+    
+    # PERMUTATION
+    for attr in SENSITIVE_ATTRIBUTES:
+        if attr not in df_train_raw.columns:
+            continue
+        if counts["permutation"] >= MAX_PER_OPERATOR:
+            break
+        
+        df_mut = df_train_raw.copy()
+        df_mut[attr] = np.random.permutation(df_mut[attr].values)
+        
+        name = f"permutation_{attr}"
+        mutants[name] = ("permutation", df_mut, None)
+        counts["permutation"] += 1
+    
+    # NOISE INJECTION
+    for sigma_mult in [1.0, 2.0, 3.0]:
+        if counts["noise_injection"] >= MAX_PER_OPERATOR:
+            break
+        
+        df_mut = df_train_raw.copy()
+        for col in LINEAR_NUMERIC_CANDIDATES:
+            if col in df_mut.columns:
+                col_std = df_mut[col].std()
+                if col_std > 0:
+                    noise = np.random.normal(0, col_std * sigma_mult, len(df_mut))
+                    df_mut[col] = df_mut[col] + noise
+        
+        name = f"noise_injection_sigma={sigma_mult:.1f}"
+        mutants[name] = ("noise_injection", df_mut, None)
+        counts["noise_injection"] += 1
+    
+    # FEATURE REMOVAL
+    for attr in SENSITIVE_ATTRIBUTES:
+        if attr not in df_train_raw.columns:
+            continue
+        if counts["feature_removal"] >= MAX_PER_OPERATOR:
+            break
+        
+        df_mut = df_train_raw.drop(columns=[attr])
+        
+        name = f"feature_removal_{attr}"
+        mutants[name] = ("feature_removal", df_mut, None)
+        counts["feature_removal"] += 1
+    
+    # DRIFT
+    for attr in SENSITIVE_ATTRIBUTES:
+        if attr not in df_train_raw.columns:
+            continue
+        if counts["drift"] >= MAX_PER_OPERATOR:
+            break
+        
+        groups = pd.unique(df_train_raw[attr].astype(str))
+        if len(groups) < 2:
+            continue
+        
+        g = groups[0]
+        half_data = df_train_raw.sample(frac=0.5, random_state=RANDOM_STATE)
+        drift_data = df_train_raw[df_train_raw[attr].astype(str) == g]
+        df_mut = pd.concat([half_data, drift_data], ignore_index=True)
+        
+        name = f"drift_{attr}={g}"
+        mutants[name] = ("drift", df_mut, None)
+        counts["drift"] += 1
+    
+    # COUNTERFACTUAL SWAP (if enabled)
+    if ENABLE_COUNTERFACTUAL_SWAP:
+        for attr in SENSITIVE_ATTRIBUTES:
+            if attr not in df_train_raw.columns:
+                continue
+            if counts.get("counterfactual_swap", 0) >= MAX_PER_OPERATOR:
+                break
+            
+            groups = pd.unique(df_train_raw[attr].astype(str))
+            if len(groups) < 2:
+                continue
+            
+            for frac in [0.3, 0.5]:
+                if counts.get("counterfactual_swap", 0) >= MAX_PER_OPERATOR:
+                    break
+                
+                n_swap = int(len(df_train_raw) * frac)
+                df_mut = df_train_raw.copy()
+                swap_idx = df_mut.sample(n=n_swap, random_state=RANDOM_STATE).index
+                df_mut.loc[swap_idx, attr] = np.random.permutation(
+                    df_mut.loc[swap_idx, attr].values
+                )
+                
+                name = f"counterfactual_swap_{attr}_frac={frac:.1f}"
+                mutants[name] = ("counterfactual_swap", df_mut, None)
+                counts["counterfactual_swap"] = counts.get("counterfactual_swap", 0) + 1
+    
+    return mutants
+
+# ============================================================
+# TEST SETS
+# ============================================================
+
+def create_test_sets(df_test_raw, y_test):
+    """
+    Build test sets: full, group-specific, and group-removed.
+    """
     sets = {}
 
-    sets["full"] = {
+    # full test
+    sets["full_test"] = {
         "indices": df_test_raw.index.to_list(),
-        "adequacy": "full"
+        "adequacy": "full_test"
     }
 
-    for frac in fractions:
-        try:
-            _, subset = train_test_split(
-                df_test_raw, test_size=frac, stratify=y_test, random_state=RANDOM_STATE
-            )
-            sets[f"stratified_{int(frac * 100)}"] = {
-                "indices": subset.index.to_list(),
-                "adequacy": f"stratified_{int(frac * 100)}"
-            }
-        except Exception:
-            pass
+    # group-specific test sets
+    for attr in SENSITIVE_ATTRIBUTES:
+        if attr not in df_test_raw.columns:
+            continue
 
+        groups = pd.unique(df_test_raw[attr].astype(str))
+
+        for g in groups:
+            subset = df_test_raw[df_test_raw[attr].astype(str) == g]
+            if len(subset) < MIN_GROUP_SIZE:
+                continue
+            key = f"{attr}={g}"
+            sets[key] = {
+                "indices": subset.index.to_list(),
+                "adequacy": key
+            }
+
+    # group-removed test sets
     for attr in SENSITIVE_ATTRIBUTES:
         if attr not in df_test_raw.columns:
             continue
@@ -749,7 +651,7 @@ def create_test_sets(df_test_raw, y_test, fractions=(0.4, 0.6, 0.8)):
     return sets
 
 # ============================================================
-# CORE PIPELINE
+# CORE PIPELINE WITH DELTA TRACKING
 # ============================================================
 
 def run_model_block(model_name, df_train_raw, df_test_raw):
@@ -760,29 +662,34 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
     X_train_s = scaler.transform(X_train.values)
     X_test_s  = scaler.transform(X_test.values)
 
-    X_train_s = np.nan_to_num(X_train_s, nan=0.0, posinf=0.0, neginf=0.0)
-    X_test_s  = np.nan_to_num(X_test_s, nan=0.0, posinf=0.0, neginf=0.0)
-
+    # base model on TEST
     _, base_pred = fit_and_predict(model_name, X_train_s, y_train, X_test_s)
 
     test_sets = create_test_sets(df_test_raw, y_test)
+
     mutants = build_all_mutants(df_train_raw, y_train)
-    print(f"[{model_name}] Total mutants generated (before shift filter): {len(mutants)}")
+    print(f"[{model_name}] Total mutants generated: {len(mutants)}")
 
     rows_eqodds = []
     rows_dp     = []
     rows_eopp   = []
+    
+    # NEW: Track all delta values for sensitivity analysis
+    delta_tracking_rows = []
 
     kept_mutants = 0
 
     for mname, (op_name, df_mut, y_mut) in mutants.items():
+        # 1) Distribution shift on TRAIN
         dist_shift_score = compute_distribution_shift_score(df_train_raw, df_mut)
 
+        # Remove only unrealistic mutants
         if dist_shift_score > HIGH_SHIFT_THRESHOLD:
             continue
 
         kept_mutants += 1
 
+        # 2) Prepare mutant data
         X_mut, y_auto, _ = prepare_xy(df_mut, ref)
         y_used = y_mut if y_mut is not None else y_auto
 
@@ -790,13 +697,13 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
             continue
 
         X_mut_s = scaler.transform(X_mut.values)
-        X_mut_s = np.nan_to_num(X_mut_s, nan=0.0, posinf=0.0, neginf=0.0)
 
         try:
             _, mut_pred_test = fit_and_predict(model_name, X_mut_s, y_used, X_test_s)
         except Exception:
             continue
 
+        # 3) Evaluate fairness on TEST subsets
         for ts_name, ts_info in test_sets.items():
             mask = X_test.index.isin(ts_info["indices"])
             if mask.sum() < MIN_GROUP_SIZE:
@@ -819,7 +726,30 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
                 # Equalized Odds
                 orig_eq = compute_equalized_odds(y_true, y_base, groups_test)
                 mut_eq  = compute_equalized_odds(y_true, y_mutp, groups_test)
-                status_eq = determine_status_per_groups(orig_eq, mut_eq, ("TPR", "FPR"))
+                status_eq, deltas_eq, max_delta_eq, mean_delta_eq, thresh_eq = determine_status_with_deltas(
+                    orig_eq, mut_eq, ("TPR", "FPR"), multiplier=1.5
+                )
+                
+                # NEW: Save delta values
+                for delta_info in deltas_eq:
+                    delta_tracking_rows.append({
+                        'model': model_name,
+                        'mutant': mname,
+                        'operator': op_name,
+                        'test_set': ts_name,
+                        'sensitive_attr': attr,
+                        'group': delta_info['group'],
+                        'fairness_metric': 'equalized_odds',
+                        'metric_component': delta_info['metric'],
+                        'delta': delta_info['delta'],
+                        'orig_value': delta_info['orig_value'],
+                        'mut_value': delta_info['mut_value'],
+                        'max_delta': max_delta_eq,
+                        'mean_delta': mean_delta_eq,
+                        'threshold': thresh_eq,
+                        'status': status_eq
+                    })
+                
                 if status_eq == "Killed":
                     killed_eq += 1
                 else:
@@ -828,7 +758,30 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
                 # Demographic Parity
                 orig_dp = compute_demographic_parity(y_base, groups_test)
                 mut_dp  = compute_demographic_parity(y_mutp, groups_test)
-                status_dp = determine_status_per_groups(orig_dp, mut_dp, ("PPR",))
+                status_dp, deltas_dp, max_delta_dp, mean_delta_dp, thresh_dp = determine_status_with_deltas(
+                    orig_dp, mut_dp, ("PPR",), multiplier=1.5
+                )
+                
+                # NEW: Save delta values
+                for delta_info in deltas_dp:
+                    delta_tracking_rows.append({
+                        'model': model_name,
+                        'mutant': mname,
+                        'operator': op_name,
+                        'test_set': ts_name,
+                        'sensitive_attr': attr,
+                        'group': delta_info['group'],
+                        'fairness_metric': 'demographic_parity',
+                        'metric_component': delta_info['metric'],
+                        'delta': delta_info['delta'],
+                        'orig_value': delta_info['orig_value'],
+                        'mut_value': delta_info['mut_value'],
+                        'max_delta': max_delta_dp,
+                        'mean_delta': mean_delta_dp,
+                        'threshold': thresh_dp,
+                        'status': status_dp
+                    })
+                
                 if status_dp == "Killed":
                     killed_dp += 1
                 else:
@@ -837,7 +790,30 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
                 # Equal Opportunity
                 orig_eo = compute_equal_opportunity(y_true, y_base, groups_test)
                 mut_eo  = compute_equal_opportunity(y_true, y_mutp, groups_test)
-                status_eo = determine_status_per_groups(orig_eo, mut_eo, ("TPR",))
+                status_eo, deltas_eo, max_delta_eo, mean_delta_eo, thresh_eo = determine_status_with_deltas(
+                    orig_eo, mut_eo, ("TPR",), multiplier=1.5
+                )
+                
+                # NEW: Save delta values
+                for delta_info in deltas_eo:
+                    delta_tracking_rows.append({
+                        'model': model_name,
+                        'mutant': mname,
+                        'operator': op_name,
+                        'test_set': ts_name,
+                        'sensitive_attr': attr,
+                        'group': delta_info['group'],
+                        'fairness_metric': 'equal_opportunity',
+                        'metric_component': delta_info['metric'],
+                        'delta': delta_info['delta'],
+                        'orig_value': delta_info['orig_value'],
+                        'mut_value': delta_info['mut_value'],
+                        'max_delta': max_delta_eo,
+                        'mean_delta': mean_delta_eo,
+                        'threshold': thresh_eo,
+                        'status': status_eo
+                    })
+                
                 if status_eo == "Killed":
                     killed_eo += 1
                 else:
@@ -879,11 +855,14 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
                     "MutationScore": round(mscore_eo, 4)
                 })
 
-    print(f"[{model_name}] Mutants kept after distribution-based filtering: {kept_mutants}")
+    print(f"[{model_name}] Mutants kept after filtering: {kept_mutants}")
 
     df_eq = pd.DataFrame(rows_eqodds)
     df_dp = pd.DataFrame(rows_dp)
     df_eo = pd.DataFrame(rows_eopp)
+    
+    # NEW: Save delta tracking data
+    df_deltas = pd.DataFrame(delta_tracking_rows)
 
     metric_map = {
         "equalized_odds": df_eq,
@@ -896,8 +875,15 @@ def run_model_block(model_name, df_train_raw, df_test_raw):
         os.makedirs(metric_dir, exist_ok=True)
         if not df_metric.empty:
             df_metric.to_csv(os.path.join(metric_dir, "detailed.csv"), index=False)
+    
+    # NEW: Save delta tracking for sensitivity analysis
+    if not df_deltas.empty:
+        delta_dir = os.path.join(OUTPUT_ROOT, "delta_tracking")
+        os.makedirs(delta_dir, exist_ok=True)
+        df_deltas.to_csv(os.path.join(delta_dir, f"{model_name}_deltas.csv"), index=False)
+        print(f"[{model_name}] Saved {len(df_deltas)} delta records to delta_tracking/")
 
-    return df_eq, df_dp, df_eo
+    return df_eq, df_dp, df_eo, df_deltas
 
 # ============================================================
 # MASTER TABLES + MAIN
@@ -935,38 +921,51 @@ def write_master_tables(frames, metric_name):
 
 if __name__ == "__main__":
     try:
-        start_time = time.time()
-
-        print("Loading BANK data...")
-        df_all = load_bank(BANK_FILE)
-
-        print("Label distribution (all):")
-        print(df_all[LABEL_COL].value_counts())
-
+        print("="*80)
+        print("BANK MARKETING - MUTATION TESTING WITH DELTA TRACKING")
+        print("="*80)
+        print()
+        
+        print("Loading Bank dataset...")
+        df_full = load_bank(BANK_FILE)
+        print(f"Total records: {len(df_full)}")
+        
+        print("\nLabel distribution:")
+        print(df_full[LABEL_COL].value_counts())
+        
+        print("\nCreating 70/30 train/test split...")
         df_train_raw, df_test_raw = train_test_split(
-            df_all,
-            test_size=0.3,
+            df_full,
+            test_size=0.30,
             random_state=RANDOM_STATE,
-            stratify=df_all[LABEL_COL]
+            stratify=df_full[LABEL_COL]
         )
-
-        print("Train size:", len(df_train_raw), " Test size:", len(df_test_raw))
+        
+        print(f"Train: {len(df_train_raw)} | Test: {len(df_test_raw)}")
 
         models = [
-            "logistic_regression",  # GPU via PyTorch
-            "decision_tree",        # XGBoost GPU if available
-            "knn",                  # CPU
-            "random_forest",        # XGBoost GPU if available
-            "gradient_boosting"     # XGBoost GPU if available
+            "logistic_regression",
+            "decision_tree",
+            "random_forest",
+            "gradient_boosting",
+            "knn"
         ]
 
         frames_eq_all = []
         frames_dp_all = []
         frames_eo_all = []
+        frames_delta_all = []  # NEW
 
         for m in models:
-            print(f"\n=== Running model: {m} ===")
-            df_eq, df_dp, df_eo = run_model_block(m, df_train_raw, df_test_raw)
+            print(f"\n{'='*80}")
+            print(f"Running model: {m}")
+            print(f"{'='*80}")
+            
+            start_time = time.time()
+            df_eq, df_dp, df_eo, df_deltas = run_model_block(m, df_train_raw, df_test_raw)
+            elapsed = time.time() - start_time
+            
+            print(f"Completed {m} in {elapsed:.2f} seconds")
 
             if not df_eq.empty:
                 df_eq["Model"] = m
@@ -979,17 +978,30 @@ if __name__ == "__main__":
             if not df_eo.empty:
                 df_eo["Model"] = m
                 frames_eo_all.append(df_eo)
+            
+            if not df_deltas.empty:
+                frames_delta_all.append(df_deltas)
 
         write_master_tables(frames_eq_all, "equalized_odds")
         write_master_tables(frames_dp_all, "demographic_parity")
         write_master_tables(frames_eo_all, "equal_opportunity")
+        
+        # NEW: Write combined delta tracking file
+        if frames_delta_all:
+            all_deltas = pd.concat(frames_delta_all, ignore_index=True)
+            delta_path = os.path.join(OUTPUT_ROOT, "delta_tracking", "all_models_deltas.csv")
+            all_deltas.to_csv(delta_path, index=False)
+            print(f"\n{'='*80}")
+            print(f"✓ Saved combined delta tracking: {delta_path}")
+            print(f"  Total delta records: {len(all_deltas):,}")
+            print(f"{'='*80}")
 
-        print("\nDone. BANK fairness mutation analysis complete.")
-        print("Results stored under:", OUTPUT_ROOT)
-        end_time = time.time()
-        total_time_sec = end_time - start_time
-        total_time_min = round(total_time_sec / 60.0, 2)
-        print(f"Total execution time: {total_time_min} minutes")
+        print("\n" + "="*80)
+        print("✓ MUTATION TESTING COMPLETE!")
+        print("="*80)
+        print(f"\nResults stored in: {OUTPUT_ROOT}")
+        print("\nNext step: Run threshold_sensitivity_analysis_bank.py")
+        print("="*80)
 
     except Exception as e:
         print("❌ Error:", e)

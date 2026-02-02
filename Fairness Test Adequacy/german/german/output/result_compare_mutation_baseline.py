@@ -22,7 +22,7 @@ warnings.filterwarnings('ignore')
 # ------------------------------
 # PATHS
 # ------------------------------
-OUTPUT_ROOT = r"C:\Users\srinivasanm23\Documents\fairness\fairness_adequacy\fair test adequacy\fair test adequacy\german\output\demographic_parity"
+OUTPUT_ROOT = r"C:\Users\srinivasanm23\Documents\fairness\fairness_adequacy\fair test adequacy\fair test adequacy\german\output\equalized_odds"
 MASTER_FILE = os.path.join(OUTPUT_ROOT, "master_summary.csv")
 TRAIN_PATH = r"C:\Users\srinivasanm23\Documents\fairness\fairness_adequacy\fair test adequacy\fair test adequacy\german\output\german_train.csv"
 TEST_PATH = r"C:\Users\srinivasanm23\Documents\fairness\fairness_adequacy\fair test adequacy\fair test adequacy\german\output\german_test.csv"
