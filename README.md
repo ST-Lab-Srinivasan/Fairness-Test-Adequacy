@@ -1,6 +1,8 @@
 ================================================================================
 MUTATION-BASED FAIRNESS TEST ADEQUACY FOR MACHINE LEARNING SYSTEMS
-================================================================================
+===============================================================================
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20061830.svg)](https://doi.org/10.5281/zenodo.20061830)
 
 Title: Mutation-Based Fairness Test Adequacy for Machine Learning Systems
 Authors: Kehinde Akinola, Madhusudan Srinivasan
